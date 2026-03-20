@@ -1,0 +1,11 @@
+{
+  "interval": 10,
+  "enabled": true,
+  "ignore_packages": [
+    "com.android.launcher",
+    "com.miui.home",
+    "com.android.systemui"
+  ],
+  "min_switch_interval": 15,
+  "log_enabled": true
+}
