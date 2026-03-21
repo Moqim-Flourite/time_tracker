@@ -11,6 +11,10 @@ BASE_DIR = '/home/operit'
 LOG_FILE = os.path.join(BASE_DIR, "time_log.csv")
 STATE_FILE = os.path.join(BASE_DIR, "current_task.json")
 
+# 夜间时段定义（用于睡眠周期制）
+NIGHT_START_HOUR = 21  # 晚上9点
+NIGHT_END_HOUR = 5     # 凌晨5点
+
 class TimeTrackerAPI(BaseHTTPRequestHandler):
     def _send_cors_headers(self):
         """添加CORS头，允许跨域访问"""
@@ -83,11 +87,37 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
             error_response = {'error': str(e)}
             self.wfile.write(json.dumps(error_response).encode())
     
-    def find_last_sleep_time(self, before_date=None):
-        """找到指定日期之前最后一次睡觉任务的开始时间
+    def parse_time(self, time_str):
+        """解析时间字符串，支持多种格式"""
+        formats = [
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S"
+        ]
+        for fmt in formats:
+            try:
+                return datetime.datetime.strptime(time_str, fmt)
+            except:
+                continue
+        return None
+    
+    def is_in_night_period(self, dt):
+        """检查时间是否在夜间时段（21:00-05:00）
+        
+        夜间时段跨越午夜：
+        - 21:00-24:00（当天晚上）
+        - 00:00-05:00（次日凌晨）
+        """
+        hour = dt.hour
+        return hour >= NIGHT_START_HOUR or hour < NIGHT_END_HOUR
+    
+    def find_sleep_in_time_range(self, start_dt, end_dt, must_in_night=True):
+        """在指定时间范围内查找睡觉记录
         
         Args:
-            before_date: 截止日期（不含该日），None表示找最新的睡觉记录
+            start_dt: 范围起始时间
+            end_dt: 范围结束时间
+            must_in_night: 是否必须在夜间时段（21:00-05:00）
             
         Returns:
             datetime: 最后一次睡觉的开始时间，如果没有返回None
@@ -105,36 +135,100 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
                     continue
                     
                 start_time_str = row.get('开始时间', '')
-                start_dt = None
+                sleep_dt = self.parse_time(start_time_str)
                 
-                for fmt in ["%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
-                    try:
-                        start_dt = datetime.datetime.strptime(start_time_str, fmt)
-                        break
-                    except:
-                        continue
-                        
-                if not start_dt:
+                if not sleep_dt:
                     continue
-                    
-                # 如果指定了截止日期，检查是否在范围内
-                if before_date:
-                    if start_dt.date() < before_date:
-                        if last_sleep_time is None or start_dt > last_sleep_time:
-                            last_sleep_time = start_dt
-                else:
-                    if last_sleep_time is None or start_dt > last_sleep_time:
-                        last_sleep_time = start_dt
+                
+                # 检查是否在时间范围内
+                if sleep_dt < start_dt or sleep_dt > end_dt:
+                    continue
+                
+                # 如果要求必须在夜间时段
+                if must_in_night and not self.is_in_night_period(sleep_dt):
+                    continue
+                
+                # 取最新的
+                if last_sleep_time is None or sleep_dt > last_sleep_time:
+                    last_sleep_time = sleep_dt
         
         return last_sleep_time
     
+    def find_sleep_cycle_start(self):
+        """根据当前时间找到睡眠周期的起始点
+        
+        时段睡眠周期制：
+        - 只有在夜间时段（21:00-05:00）的"睡觉了"才算新一天的起始
+        - 凌晨0-5点：找昨晚21点后的睡觉
+        - 早晨5-21点：找今天5点前的睡觉，没有则找昨晚21点后的
+        - 晚上21-24点：找今天5点前的睡觉
+        
+        Returns:
+            datetime: 当前睡眠周期的起始时间
+        """
+        now = datetime.datetime.now()
+        hour = now.hour
+        
+        if hour < NIGHT_END_HOUR:
+            # 凌晨 0-5 点：找昨晚 21 点后的睡觉
+            last_night_start = now.replace(hour=NIGHT_START_HOUR, minute=0, second=0, microsecond=0) - datetime.timedelta(days=1)
+            sleep_start = self.find_sleep_in_time_range(last_night_start, now, must_in_night=True)
+            return sleep_start
+            
+        elif hour < NIGHT_START_HOUR:
+            # 白天 5-21 点：先找今天 5 点前的睡觉，再找昨晚 21 点后的
+            today_early = now.replace(hour=NIGHT_END_HOUR, minute=0, second=0, microsecond=0)
+            
+            # 先找今天凌晨的睡觉
+            sleep_start = self.find_sleep_in_time_range(today_early - datetime.timedelta(hours=NIGHT_END_HOUR), today_early, must_in_night=True)
+            
+            if sleep_start:
+                return sleep_start
+            
+            # 再找昨晚的睡觉
+            last_night_start = now.replace(hour=NIGHT_START_HOUR, minute=0, second=0, microsecond=0) - datetime.timedelta(days=1)
+            sleep_start = self.find_sleep_in_time_range(last_night_start, now, must_in_night=True)
+            return sleep_start
+            
+        else:
+            # 晚上 21-24 点：找今天凌晨的睡觉
+            today_early = now.replace(hour=NIGHT_END_HOUR, minute=0, second=0, microsecond=0)
+            sleep_start = self.find_sleep_in_time_range(today_early - datetime.timedelta(hours=NIGHT_END_HOUR), today_early, must_in_night=True)
+            return sleep_start
+    
+    def find_sleep_cycle_for_date(self, date):
+        """找到指定日期的睡眠周期
+        
+        Args:
+            date: 目标日期
+            
+        Returns:
+            (start_dt, end_dt): 周期的开始和结束时间
+        """
+        # 该日期的睡眠周期：前一天晚上21点后的睡觉 → 该日期晚上21点后的睡觉
+        # 或者更准确：前一天夜间时段的睡觉 → 该日期夜间时段的睡觉
+        
+        night_before_start = datetime.datetime.combine(date - datetime.timedelta(days=1), datetime.time(NIGHT_START_HOUR, 0, 0))
+        night_start = datetime.datetime.combine(date, datetime.time(NIGHT_START_HOUR, 0, 0))
+        
+        # 周期开始：前一天夜间的睡觉
+        cycle_start = self.find_sleep_in_time_range(night_before_start, night_start + datetime.timedelta(hours=8), must_in_night=True)
+        
+        # 周期结束：当天夜间的睡觉
+        cycle_end = self.find_sleep_in_time_range(night_start, night_start + datetime.timedelta(hours=8), must_in_night=True)
+        
+        return cycle_start, cycle_end
+    
     def handle_report(self, period='today'):
-        """获取统计报表（睡眠周期制统计）
+        """获取统计报表 - 支持自然天和时段睡眠周期制
         
         统计周期：
-        - today: 从昨天晚上睡觉 → 现在
-        - yesterday: 从前天晚上睡觉 → 昨天晚上睡觉
-        - week/total: 保持原逻辑
+        - natural_today: 自然天，今天 00:00 → 现在
+        - today: 时段睡眠周期制，最近一次夜间（21:00-05:00）睡觉 → 现在
+        - yesterday: 时段睡眠周期制，前一天的睡眠周期
+        - week/total: 按开始时间判断
+        
+        返回结构化数据，方便前端使用
         """
         try:
             if not os.path.exists(LOG_FILE):
@@ -142,105 +236,92 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
             else:
                 stats = {}
                 now = datetime.datetime.now()
+                period_start = None
+                period_end = None
+                period_type = "standard"
                 
-                # 计算睡眠周期边界
-                if period == "yesterday":
-                    # 昨天 = 前天晚上睡觉 → 昨天晚上睡觉
+                # 计算统计边界
+                if period == "natural_today":
+                    # 自然天：今天 00:00 → 现在
+                    today_date = now.date()
+                    period_start = datetime.datetime.combine(today_date, datetime.time(0, 0, 0))
+                    period_end = now
+                    period_type = "natural_day"
+                    
+                elif period == "yesterday":
+                    # 时段睡眠周期制 - 昨天
                     yesterday_date = (now - datetime.timedelta(days=1)).date()
-                    day_before_yesterday = (now - datetime.timedelta(days=2)).date()
+                    period_start, period_end = self.find_sleep_cycle_for_date(yesterday_date)
+                    period_type = "sleep_cycle"
                     
-                    # 找昨天最后一次睡觉的开始时间（周期结束）
-                    day_end = self.find_last_sleep_time(before_date=yesterday_date + datetime.timedelta(days=1))
-                    # 找前天最后一次睡觉的开始时间（周期开始）
-                    day_start = self.find_last_sleep_time(before_date=yesterday_date)
-                    
-                    if not day_start or not day_end:
-                        response = {'error': f'没有找到睡眠记录来确定统计周期，请确保有睡眠记录'}
+                    if not period_start:
+                        response = {'error': '没有找到睡眠记录来确定统计周期（需要前一天夜间21:00-05:00的睡觉记录）'}
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
                         self._send_cors_headers()
                         self.end_headers()
-                        self.wfile.write(json.dumps(response).encode())
+                        self.wfile.write(json.dumps(response, ensure_ascii=False).encode())
                         return
                         
                 elif period == "today":
-                    # 今天 = 昨天晚上睡觉 → 现在
-                    today_date = now.date()
-                    day_start = self.find_last_sleep_time(before_date=today_date)
-                    day_end = now
+                    # 时段睡眠周期制 - 今天
+                    period_start = self.find_sleep_cycle_start()
+                    period_end = now
+                    period_type = "sleep_cycle"
                     
-                    if not day_start:
-                        response = {'error': f'没有找到睡眠记录来确定统计周期，请确保有睡眠记录'}
+                    if not period_start:
+                        response = {'error': '没有找到睡眠记录来确定统计周期（需要夜间21:00-05:00的睡觉记录）'}
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
                         self._send_cors_headers()
                         self.end_headers()
-                        self.wfile.write(json.dumps(response).encode())
+                        self.wfile.write(json.dumps(response, ensure_ascii=False).encode())
                         return
-                else:
-                    day_start = None
-                    day_end = None
                 
                 with open(LOG_FILE, 'r', encoding='utf-8-sig') as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        # 支持两种时间格式
                         start_time_str = row['开始时间']
                         end_time_str = row.get('结束时间', '')
-                        start_dt = None
-                        end_dt = None
-                        
-                        for fmt in ["%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"]:
-                            try:
-                                if not start_dt:
-                                    start_dt = datetime.datetime.strptime(start_time_str, fmt)
-                                if end_time_str and not end_dt:
-                                    end_dt = datetime.datetime.strptime(end_time_str, fmt)
-                            except:
-                                continue
+                        start_dt = self.parse_time(start_time_str)
+                        end_dt = self.parse_time(end_time_str) if end_time_str else None
                         
                         if not start_dt:
-                            continue  # 跳过解析失败的行
+                            continue
                         
                         cat = row['类别']
                         
-                        # 对于today和yesterday，使用跨日分摊逻辑
-                        if period in ["today", "yesterday"] and day_start and day_end:
-                            # 计算该记录落在目标日期的时间
+                        if period in ["today", "yesterday", "natural_today"] and period_start and period_end:
                             if not end_dt:
-                                end_dt = start_dt  # 没有结束时间则跳过
-                            
-                            # 计算交集（记录时间 ∩ 目标日期）
-                            effective_start = max(start_dt, day_start)
-                            effective_end = min(end_dt, day_end)
-                            
+                                end_dt = start_dt
+                            effective_start = max(start_dt, period_start)
+                            effective_end = min(end_dt, period_end)
                             if effective_end > effective_start:
                                 sec = int((effective_end - effective_start).total_seconds())
                                 stats[cat] = stats.get(cat, 0) + sec
                         else:
-                            # week和total保持原逻辑（按开始时间判断）
                             is_match = False
                             if period == "week" and (now - start_dt).days < 7:
                                 is_match = True
                             elif period == "total":
                                 is_match = True
-                            
                             if is_match:
                                 sec = int(row['持续秒数'])
                                 stats[cat] = stats.get(cat, 0) + sec
-
+                                
                 if not stats:
                     response = {'error': f'在 {period} 范围内没有找到记录。'}
                 else:
-                    # 格式化输出
                     total_sec = sum(stats.values())
-                    
-                    # 生成周期信息
                     period_info = ""
-                    if period in ["today", "yesterday"] and day_start and day_end:
-                        start_str = day_start.strftime("%m-%d %H:%M")
-                        end_str = day_end.strftime("%m-%d %H:%M") if period == "yesterday" else "现在"
-                        period_info = f"\n**统计周期：{start_str} → {end_str}**（睡眠周期制）\n"
+                    if period in ["today", "yesterday", "natural_today"] and period_start and period_end:
+                        start_str = period_start.strftime("%m-%d %H:%M")
+                        end_str = period_end.strftime("%m-%d %H:%M") if period == "yesterday" else "现在"
+                        if period == "natural_today":
+                            cycle_type = "自然天"
+                        else:
+                            cycle_type = "时段睡眠周期制（21:00-05:00）"
+                        period_info = f"\n**统计周期：{start_str} → {end_str}**（{cycle_type}）\n"
                     
                     report_lines = [
                         f"### 📊 时间统计报表 ({period})",
@@ -248,21 +329,28 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
                         "| 类别 | 时长 | 占比 |",
                         "| :--- | :--- | :--- |"
                     ]
-                    
                     for cat, sec in sorted(stats.items(), key=lambda x: x[1], reverse=True):
                         h = sec // 3600
                         m = (sec % 3600) // 60
                         percent = (sec / total_sec) * 100
                         report_lines.append(f"| {cat} | {h}h {m}m | {percent:.1f}% |")
-                    
                     report_lines.append(f"\n**总计消耗：{total_sec // 3600}小时{(total_sec % 3600) // 60}分钟**")
-                    response = {'report': '\n'.join(report_lines)}
+                    
+                    response = {
+                        'report': '\n'.join(report_lines),
+                        'period': period,
+                        'period_type': period_type,
+                        'period_start': period_start.isoformat() if period_start else None,
+                        'period_end': period_end.isoformat() if period_end else None,
+                        'total_seconds': total_sec,
+                        'categories': stats
+                    }
             
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self._send_cors_headers()
             self.end_headers()
-            self.wfile.write(json.dumps(response).encode())
+            self.wfile.write(json.dumps(response, ensure_ascii=False).encode())
             
         except Exception as e:
             self.send_response(500)
@@ -270,7 +358,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
             self._send_cors_headers()
             self.end_headers()
             error_response = {'error': str(e)}
-            self.wfile.write(json.dumps(error_response).encode())
+            self.wfile.write(json.dumps(error_response, ensure_ascii=False).encode())
     
     def handle_start(self, task_name):
         """开始任务"""
@@ -325,7 +413,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self._send_cors_headers()
             self.end_headers()
-            self.wfile.write(json.dumps(response).encode())
+            self.wfile.write(json.dumps(response, ensure_ascii=False).encode())
             
         except Exception as e:
             self.send_response(500)
@@ -333,7 +421,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
             self._send_cors_headers()
             self.end_headers()
             error_response = {'error': str(e)}
-            self.wfile.write(json.dumps(error_response).encode())
+            self.wfile.write(json.dumps(error_response, ensure_ascii=False).encode())
     
     def handle_stop(self):
         """停止任务"""
@@ -380,7 +468,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self._send_cors_headers()
             self.end_headers()
-            self.wfile.write(json.dumps(response).encode())
+            self.wfile.write(json.dumps(response, ensure_ascii=False).encode())
             
         except Exception as e:
             self.send_response(500)
@@ -388,7 +476,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
             self._send_cors_headers()
             self.end_headers()
             error_response = {'error': str(e)}
-            self.wfile.write(json.dumps(error_response).encode())
+            self.wfile.write(json.dumps(error_response, ensure_ascii=False).encode())
 
 def run_server(port=8000):
     server_address = ('', port)
