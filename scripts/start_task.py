@@ -16,7 +16,7 @@ import sys
 import os
 import json
 import csv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import re
 import subprocess
@@ -309,6 +309,193 @@ def format_duration(seconds):
     minutes = (seconds % 3600) // 60
     return f"{hours}h {minutes}m"
 
+def generate_daily_summary():
+    """生成每日总结并写入memory_daily.md
+    
+    当用户说"睡觉了"时自动调用，统计今天的数据并生成总结。
+    使用时段睡眠周期制：只统计最近一次夜间睡觉(21:00-05:00)到现在的数据。
+    """
+    import urllib.request
+    import urllib.error
+    
+    BEIJING_TZ = timezone(timedelta(hours=8))
+    
+    try:
+        # 1. 从API获取今日统计数据（使用时段睡眠周期制）
+        api_url = "http://localhost:8080/api/report?period=today"
+        try:
+            with urllib.request.urlopen(api_url, timeout=10) as response:
+                api_data = json.loads(response.read().decode('utf-8'))
+            report_text = api_data.get("report", "")
+            period_start = api_data.get("period_start", "")
+            total_seconds = api_data.get("total_seconds", 0)
+        except Exception as e:
+            print(f"⚠️ 获取API数据失败: {e}")
+            report_text = ""
+            period_start = ""
+            total_seconds = 0
+        
+        # 2. 解析报告中的统计数据
+        time_items = []
+        if report_text:
+            lines = report_text.split('\n')
+            for line in lines:
+                if '|' in line and not line.startswith('| :---') and not line.startswith('| 类别') and '总计' not in line:
+                    parts = [p.strip() for p in line.split('|') if p.strip()]
+                    if len(parts) >= 3:
+                        name, duration, pct = parts[0], parts[1], parts[2]
+                        time_items.append({
+                            "name": name,
+                            "duration": duration,
+                            "percent": pct
+                        })
+        
+        # 3. 读取现有memory_daily.md，提取今日完成项
+        memory_file = "/home/operit/memory_daily.md"
+        today_completed = []
+        yesterday_section = None
+        
+        if os.path.exists(memory_file):
+            with open(memory_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 提取今日完成项
+            lines = content.split('\n')
+            in_today_section = False
+            in_completed_section = False
+            
+            for line in lines:
+                # 检测是否进入今日部分
+                today_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+                if today_str in line or "今天" in line:
+                    in_today_section = True
+                elif line.startswith("## ") and today_str not in line:
+                    in_today_section = False
+                    in_completed_section = False
+                
+                # 提取完成项
+                if in_today_section:
+                    if "今日完成" in line:
+                        in_completed_section = True
+                    elif line.startswith("### "):
+                        in_completed_section = False
+                    elif in_completed_section and line.startswith("- "):
+                        item = line[2:].strip()
+                        if item and not item.startswith("[ ]"):
+                            today_completed.append(item)
+        
+        # 4. 获取当前时间
+        now = get_current_time()
+        today_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M")
+        
+        # 5. 计算入睡时间（当前时间）
+        sleep_time = time_str
+        
+        # 6. 生成新的总结内容
+        # 分类统计
+        productive_items = [i for i in time_items if i["name"] in ["调ai", "空闲", "学习", "工作"]]
+        leisure_items = [i for i in time_items if i["name"] in ["刷手机", "打游戏"]]
+        rest_items = [i for i in time_items if i["name"] in ["睡觉"]]
+        
+        productive_mins = sum(int(i["duration"].replace("h ", ":").replace("m", "").split(":")[0])*60 + int(i["duration"].replace("h ", ":").replace("m", "").split(":")[1]) for i in productive_items if "h" in i["duration"]) if productive_items else 0
+        leisure_mins = sum(int(i["duration"].replace("h ", ":").replace("m", "").split(":")[0])*60 + int(i["duration"].replace("h ", ":").replace("m", "").split(":")[1]) for i in leisure_items if "h" in i["duration"]) if leisure_items else 0
+        rest_mins = sum(int(i["duration"].replace("h ", ":").replace("m", "").split(":")[0])*60 + int(i["duration"].replace("h ", ":").replace("m", "").split(":")[1]) for i in rest_items if "h" in i["duration"]) if rest_items else 0
+        
+        total_mins = productive_mins + leisure_mins + rest_mins
+        prod_pct = round(productive_mins / total_mins * 100) if total_mins > 0 else 0
+        
+        # 生成建议
+        if prod_pct >= 40:
+            suggestion = "✨ 今天产出效率不错！"
+        elif prod_pct >= 25:
+            suggestion = "📊 效率一般，明天可以更专注一些"
+        else:
+            suggestion = "💤 今天休息较多，明天加油！"
+        
+        # 7. 构建新的memory_daily.md内容
+        new_content = f"""# 📅 每日总结
+
+## {today_str} (明天)
+
+### ✅ 今日完成
+- [待明天记录]
+
+### ⏰ 昨日时间统计
+| 任务 | 时长 | 占比 |
+|------|------|------|
+"""
+        # 添加时间统计
+        for item in time_items:
+            new_content += f"| {item['name']} | {item['duration']} | {item['percent']} |\n"
+        
+        total_hours = total_seconds // 3600
+        total_mins_display = (total_seconds % 3600) // 60
+        new_content += f"| **总计** | **{total_hours}h {total_mins_display}m** | 100% |\n"
+        
+        new_content += f"""
+### 🌙 睡眠
+- 入睡时间：{sleep_time}
+- 监控状态：已锁定
+
+### 📋 今日计划提醒
+- 早上醒来：询问每日计划
+
+---
+
+*本次总结生成于 {now.strftime('%Y-%m-%d %H:%M:%S')}*
+*使用时段睡眠周期制统计（21:00-05:00夜间睡觉为新一天起始）*
+
+---
+
+## {now.strftime("%Y-%m-%d")} (今天) - 已归档
+
+### ✅ 今日完成
+"""
+        # 添加今日完成项
+        if today_completed:
+            for item in today_completed:
+                new_content += f"- {item}\n"
+        else:
+            new_content += "- 暂无记录\n"
+        
+        new_content += f"""
+### ⏰ 时间统计
+"""
+        # 添加时间统计
+        for item in time_items:
+            new_content += f"- {item['name']}: {item['duration']} ({item['percent']})\n"
+        
+        new_content += f"""
+### 🌙 睡眠
+- 入睡时间：{sleep_time}
+
+### 💡 总结
+{suggestion}
+
+---
+
+*最后更新：{now.strftime('%Y-%m-%d %H:%M:%S')}*
+"""
+        
+        # 8. 写入文件
+        with open(memory_file, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        
+        print(f"✅ 每日总结已生成并写入 memory_daily.md")
+        print(f"📊 今日统计：总时长 {total_hours}h {total_mins_display}m，产出效率 {prod_pct}%")
+        
+        # 9. 发送通知
+        send_notification("🌙 睡眠模式", f"每日总结已生成\n总时长: {total_hours}h {total_mins_display}m\n{suggestion}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"⚠️ 生成每日总结失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     if len(sys.argv) < 2:
         print("❌ 请提供任务名称")
@@ -332,6 +519,7 @@ def main():
     
     # 数据文件路径
     current_task_file = "/home/operit/current_task.json"
+    current_task_file_android = "/sdcard/OperitNotifications/current_task.json"  # Android 可访问路径（供 AutoJS 读取）
     time_log_file = "/home/operit/time_log.csv"
     web_status_file = "/data/user/0/com.ai.assistance.operit/files/workspace/ea9e1ec2-3f82-46e4-9c7a-a251ac5c747e/web_status.json"
     
@@ -391,8 +579,21 @@ def main():
     with open(current_task_file, 'w', encoding='utf-8') as f:
         json.dump(new_task, f, ensure_ascii=False, indent=2)
     
+    # 同步写入 Android 可访问路径（供 AutoJS 亮屏提醒读取）
+    try:
+        with open(current_task_file_android, 'w', encoding='utf-8') as f:
+            json.dump(new_task, f, ensure_ascii=False, indent=2)
+        print(f"✅ 任务状态已同步到 Android 路径")
+    except Exception as e:
+        print(f"⚠️ 同步 Android 路径失败：{e}")
+    
     if is_locked:
         print(f"🔒 监控已锁定：{task_name}（自动监控暂停，说'吃完了/睡醒了'解锁）")
+    
+    # 如果是睡觉任务，生成每日总结
+    if task_name == "睡觉":
+        print("🌙 检测到睡觉任务，开始生成每日总结...")
+        generate_daily_summary()
     
     print(f"✅ 已开始记录：{task_name}，开始时间：{now_local.strftime('%Y-%m-%d %H:%M:%S')}")
     
