@@ -15,6 +15,13 @@ STATE_FILE = os.path.join(BASE_DIR, "current_task.json")
 NIGHT_START_HOUR = 21  # 晚上9点
 NIGHT_END_HOUR = 5     # 凌晨5点
 
+# 北京时区（UTC+8）
+BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+def get_beijing_time():
+    """获取北京时间"""
+    return datetime.datetime.now(BEIJING_TZ).replace(tzinfo=None)  # 返回naive datetime，但值是北京时间
+
 class TimeTrackerAPI(BaseHTTPRequestHandler):
     def _send_cors_headers(self):
         """添加CORS头，允许跨域访问"""
@@ -166,7 +173,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
         Returns:
             datetime: 当前睡眠周期的起始时间
         """
-        now = datetime.datetime.now()
+        now = get_beijing_time()
         hour = now.hour
         
         if hour < NIGHT_END_HOUR:
@@ -235,7 +242,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
                 response = {'error': '目前还没有任何记录数据。'}
             else:
                 stats = {}
-                now = datetime.datetime.now()
+                now = get_beijing_time()
                 period_start = None
                 period_end = None
                 period_type = "standard"
@@ -373,7 +380,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
                         with open(STATE_FILE, 'r') as f:
                             old_state = json.load(f)
                         old_start = datetime.datetime.strptime(old_state['start_time'], "%Y-%m-%d %H:%M:%S")
-                        old_end = datetime.datetime.now()
+                        old_end = get_beijing_time()
                         old_duration = old_end - old_start
                         
                         # 写入CSV
@@ -394,7 +401,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
                         print(f"停止旧任务失败: {e}")
                 
                 # 创建新任务
-                now = datetime.datetime.now()
+                now = get_beijing_time()
                 state = {
                     "task_name": task_name,
                     "start_time": now.strftime("%Y-%m-%d %H:%M:%S")
@@ -437,7 +444,7 @@ class TimeTrackerAPI(BaseHTTPRequestHandler):
                 else:
                     # 计算持续时间
                     start_time = datetime.datetime.strptime(state['start_time'], "%Y-%m-%d %H:%M:%S")
-                    end_time = datetime.datetime.now()
+                    end_time = get_beijing_time()
                     duration = end_time - start_time
                     
                     # 写入CSV
