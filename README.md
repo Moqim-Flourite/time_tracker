@@ -117,3 +117,17 @@ python3 api_server.py 8080
 Copyright (c) 2026 Moqim-Flourite
 
 本项目采用 [MIT License](LICENSE) 开源。
+
+## 🔧 故障排查
+
+遇到问题？查看 [故障排查指南](docs/TROUBLESHOOTING.md)
+
+常见问题：
+- Web界面任务不同步
+- 监控不检测App切换
+- Proot频繁崩溃
+
+快速修复：
+```bash
+bash /home/operit/fix_monitor.sh
+```
