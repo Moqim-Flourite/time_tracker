@@ -112,4 +112,8 @@ python3 api_server.py 8080
 
 ## 📄 License
 
-MIT License
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+
+Copyright (c) 2026 Moqim-Flourite
+
+本项目采用 [MIT License](LICENSE) 开源。
